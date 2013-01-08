@@ -37,7 +37,6 @@ def saveedf(filename, data, imgn=0):
 def magf(x):
     return abs(numpy.fft.fftn(x))
 
-
 print "pycdi.py phase retrival program"
 print "usage ./pycdi.py data file number of iterations (optional)"
 print "example ./pycdi.py image.edf 2000"
@@ -66,9 +65,10 @@ try:
   img[maski > 0] = 0
   print "using image mask"
 except: pass
-
+img = numpy.sqrt(numpy.load(filename))
 n, m, k = shape = img.shape
 size = img.size
+
 #img=shift(img,(0.5,0.5,0),order=1,prefilter=False)
 sq = 40
 x, y, z = numpy.mgrid[-n / 2:n / 2, -m / 2:m / 2, -k / 2:k / 2]
@@ -81,7 +81,6 @@ img[n / 2 - sx:n / 2 + sx, m / 2 - sy:m / 2 + sy, k / 2 - sz:k / 2 + sz] = 0
 print n, m, k
 print " Treating " + filename
 print " Number of iterations " + str(N)
-
 #HIO
 beta = 0.9
 gamma_1 = -1.0#not used
@@ -90,7 +89,6 @@ gamma_2 = 1.0 / beta
 
 sobject = numpy.random.random_sample((n, m, k)).astype(numpy.float32)
 #sobject=load('random.npy')
-
 try:
   mask = numpy.zeros((n, m, k))
   #tmp=load('p1_3Dn2cp12_AreconstructionAverage.npy')
@@ -128,17 +126,15 @@ indexp = numpy.where(mag > 0)#pixels where the data >0
 #isobm[index]=1
 sobm = numpy.zeros((n, m, k), dtype=numpy.int8)
 sobm[s_index] = 1
-
 sobject = sobject.astype(numpy.complex64)
 ctx = pycuda.autoinit.context
-gpu_data = gpuarray.empty(shape, numpy.complex64)
-gpu_last = gpuarray.empty(shape, numpy.complex64)
-gpu_intensity = gpuarray.empty(shape, numpy.float32)
-gpu_mask = gpuarray.empty(shape, numpy.int8)
+gpu_data = gpuarray.zeros(shape, numpy.complex64)
+gpu_last = gpuarray.zeros(shape, numpy.complex64)
+gpu_intensity = gpuarray.zeros(shape, numpy.float32)
+gpu_mask = gpuarray.zeros(shape, numpy.int8)
 plan = cu_fft.Plan(shape, numpy.complex64, numpy.complex64)
 
-constrains_fourier = ElementwiseKernel(#[VectorArg(numpy.complex64, "fourier"), VectorArg(numpy.float32, "intensity") ],
-                                                          "pycuda::complex<float> *fourier, float *intensity",
+constrains_fourier = ElementwiseKernel([VectorArg(numpy.complex64, "fourier"), VectorArg(numpy.float32, "intensity") ],
         """
         float one_int, data_abs;
         pycuda::complex<float> data;
@@ -148,9 +144,8 @@ constrains_fourier = ElementwiseKernel(#[VectorArg(numpy.complex64, "fourier"), 
         data_abs = abs(data);    
         if ((one_int > 0.0) && (data_abs!=0.0))
             fourier[i] = one_int *data / data_abs;
-        """)
-constrains_real = ElementwiseKernel(#"pycuda::complex<float> *vol, pycuda::complex<float> *last, signed char *mask, float scale",
-                                    [VectorArg(numpy.complex64, "vol"),
+        """, name="kfourier")
+constrains_real = ElementwiseKernel([VectorArg(numpy.complex64, "vol"),
                                      VectorArg(numpy.complex64, "last"),
                                      VectorArg(numpy.int8, "mask"),
                                      ScalarArg(numpy.float32, "scale")],
@@ -162,13 +157,12 @@ constrains_real = ElementwiseKernel(#"pycuda::complex<float> *vol, pycuda::compl
                     vol[i] = last[i]-scale*data;
         else
                     vol[i] = data;        
-        """)
+        """, name="kdirect")
 
 #real_space = numpy.empty(sobject.shape, dtype=numpy.complex64)
 #fourier_space = numpy.empty(sobject.shape, dtype=numpy.complex64)
 #fft = fftw3f.Plan(real_space, fourier_space, direction='forward', nthreads=threads)
 #ifft = fftw3f.Plan(fourier_space, real_space, direction='backward', nthreads=threads)
-
 erra = []
 errtmp = 0
 nerr = 0
@@ -186,11 +180,11 @@ N2 = int(N * 0.7)
 N3 = int(N * 0.7)
 
 gpu_data.set(sobject.astype(numpy.complex64))
-gpu_last = pycuda.driver.memcpy_dtod(gpu_last.gpudata, gpu_data.gpudata, gpu_data.nbytes)
+pycuda.driver.memcpy_dtod(gpu_last.gpudata, gpu_data.gpudata, gpu_data.nbytes)
 gpu_intensity.set(mag)
 gpu_mask.set(sobm)
 #print real_space.nbytes
-for i in range(100):
+for i in range(N):
     t0 = time()
     cu_fft.fft(gpu_data, gpu_data, plan)
     constrains_fourier(gpu_data, gpu_intensity)
