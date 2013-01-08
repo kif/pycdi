@@ -1,17 +1,21 @@
 #!/usr/bin/env python
 #reconstruction code for HIO
 
+import EdfFile
 import numpy
 import numpy.fft
-import EdfFile
 import sys
 from time import time, sleep
 from os.path import isfile
 from scipy.ndimage import gaussian_filter
-import fftw3f
-from CDI3D import isob, sob, errtd
-import constrains
 import multiprocessing
+
+import pycuda
+import pycuda.autoinit
+from pycuda.elementwise import ElementwiseKernel, VectorArg, ScalarArg
+import pycuda.driver
+import pycuda.gpuarray as gpuarray
+import scikits.cuda.fft as cu_fft
 
 def loadedf(filename, imgn=0):
     if isfile(filename):
@@ -63,7 +67,8 @@ try:
   print "using image mask"
 except: pass
 
-n, m, k = img.shape
+n, m, k = shape = img.shape
+size = img.size
 #img=shift(img,(0.5,0.5,0),order=1,prefilter=False)
 sq = 40
 x, y, z = numpy.mgrid[-n / 2:n / 2, -m / 2:m / 2, -k / 2:k / 2]
@@ -125,10 +130,44 @@ sobm = numpy.zeros((n, m, k), dtype=numpy.int8)
 sobm[s_index] = 1
 
 sobject = sobject.astype(numpy.complex64)
-real_space = numpy.empty(sobject.shape, dtype=numpy.complex64)
-fourier_space = numpy.empty(sobject.shape, dtype=numpy.complex64)
-fft = fftw3f.Plan(real_space, fourier_space, direction='forward', nthreads=threads)
-ifft = fftw3f.Plan(fourier_space, real_space, direction='backward', nthreads=threads)
+ctx = pycuda.autoinit.context
+gpu_data = gpuarray.empty(shape, numpy.complex64)
+gpu_last = gpuarray.empty(shape, numpy.complex64)
+gpu_intensity = gpuarray.empty(shape, numpy.float32)
+gpu_mask = gpuarray.empty(shape, numpy.int8)
+plan = cu_fft.Plan(shape, numpy.complex64, numpy.complex64)
+
+constrains_fourier = ElementwiseKernel(#[VectorArg(numpy.complex64, "fourier"), VectorArg(numpy.float32, "intensity") ],
+                                                          "pycuda::complex<float> *fourier, float *intensity",
+        """
+        float one_int, data_abs;
+        pycuda::complex<float> data;
+        
+        data = fourier[i];
+        one_int = intensity[i]; 
+        data_abs = abs(data);    
+        if ((one_int > 0.0) && (data_abs!=0.0))
+            fourier[i] = one_int *data / data_abs;
+        """)
+constrains_real = ElementwiseKernel(#"pycuda::complex<float> *vol, pycuda::complex<float> *last, signed char *mask, float scale",
+                                    [VectorArg(numpy.complex64, "vol"),
+                                     VectorArg(numpy.complex64, "last"),
+                                     VectorArg(numpy.int8, "mask"),
+                                     ScalarArg(numpy.float32, "scale")],
+        """
+        pycuda::complex<float> data;
+        
+        data = vol[i] / (float) n;  
+        if ((mask[i]>0) || (data.real()<0))
+                    vol[i] = last[i]-scale*data;
+        else
+                    vol[i] = data;        
+        """)
+
+#real_space = numpy.empty(sobject.shape, dtype=numpy.complex64)
+#fourier_space = numpy.empty(sobject.shape, dtype=numpy.complex64)
+#fft = fftw3f.Plan(real_space, fourier_space, direction='forward', nthreads=threads)
+#ifft = fftw3f.Plan(fourier_space, real_space, direction='backward', nthreads=threads)
 
 erra = []
 errtmp = 0
@@ -139,70 +178,30 @@ time0 = time()
 ii = 0
 tmpimg = numpy.zeros((n, m, k), dtype=numpy.float32)
 
-#ln=copy(sq)#size of the array for visualisation
 ln = sq + 5
 mags = mag[indexp].sum()
 del indexp
 s = 3
-#nm = 1.0 / (n * m * k)
 N2 = int(N * 0.7)
 N3 = int(N * 0.7)
 
-real_space[:] = sobject.astype(numpy.complex64)
-last = real_space.copy()
-print real_space.nbytes
-for i in range(N):
-    fft()
+gpu_data.set(sobject.astype(numpy.complex64))
+gpu_last = pycuda.driver.memcpy_dtod(gpu_last.gpudata, gpu_data.gpudata, gpu_data.nbytes)
+gpu_intensity.set(mag)
+gpu_mask.set(sobm)
+#print real_space.nbytes
+for i in range(100):
     t0 = time()
-#    isobject += isob(isobject, mag, sout, n, m, k)
-#    print abs(fourier_space[115:118, 115:118, 115:118])
-    constrains.constrains_fourier(fourier_space, mag)
-    print("constrains in Fourier space took %.3fs" % (time() - t0))
-#    print abs(fourier_space[115:118, 115:118, 115:118])
-#    sys.exit()
-    ifft()
-#    isout *= nm
-#    sobject += sob(sobject, isout, beta, sobm, n, m, k)
+    cu_fft.fft(gpu_data, gpu_data, plan)
+    constrains_fourier(gpu_data, gpu_intensity)
+    cu_fft.ifft(gpu_data, gpu_data, plan, True)
+    constrains_real(gpu_data, gpu_last, gpu_mask, beta)
+    pycuda.driver.memcpy_dtod(gpu_last.gpudata, gpu_data.gpudata, gpu_data.nbytes)
     t1 = time()
-    constrains.constrains_real(real_space, last, sobm, beta)
-    last = real_space.copy()
+    ctx.synchronize()
     t2 = time()
-    print("constrains in Real space took %.3fs, the full loop took %.3fs" % (t2 - t1, t2 - t0))
-#    errtmp = errtd(mag, sout, mags, n, m, k)
-#    tmpimg += isout
-#    if errtmp < serr:
-#        nerr = copy(i)
-#        ii = copy(i)
-#        result -= result
-#        result += isout
-#        serr = copy(errtmp)
-#    erra.append(errtmp)
-#    print i, "%.4f" % erra[-1], "%.4f" % serr, ii, "%.4f" % s
-#    if i < N2:
-#        if (i + 1) / 20 == (i + 1) / 20.0:
-#          s = 0.25 + 2.25 * exp(-(i + 1.0) / N3)
-#          tmpimg = gaussian_filter(tmpimg, s)
-#          sobm *= 0 #this is good
-#          sobm[where(tmpimg < tmpimg.max() * 0.04)] += 1#this is good
-#          tmpimg *= 0
-#          errtmp = 1.0
-#          serr = 2.0
-#    else:
-#        sobject[sobm > 0] = 0
+    print("With CUDA, the full loop took %.3fs but after sync %.3fs" % (t1 - t0, t2 - t0))
 
-#tmpimg/=N
 del tmpimg
 print "it took", time() - time0, N / (time() - time0)
 print "smallest error", serr, "number", nerr
-inputfile = filename.split(".")[0] + "_AreconstructionHIOfs" + str(int(serr * 10000)) + ".npy"
-inputfilep = filename.split(".")[0] + "_AreconstructionHIOfsP" + str(int(serr * 10000)) + ".npy"
-
-z = 0
-while isfile(inputfile):
-  inputfile = filename.split(".")[0] + "_AreconstructionHIOfs" + str(int(serr * 10000)) + str(z) + ".npy"
-  inputfilep = filename.split(".")[0] + "_AreconstructionHIOfsP" + str(int(serr * 10000)) + str(z) + ".npy"
-  z += 1
-
-numpy.save(inputfile, abs(result))
-numpy.save(inputfilep, arctan(imag(result) / real(result)))
-numpy.savetxt(filename.split(".")[0] + "_error.dat", erra)
