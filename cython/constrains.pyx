@@ -78,7 +78,9 @@ def constrains_real( vol not None,
     assert last.size == size
     assert mask.size == size
     for i in prange(size, nogil=True, schedule="static"):
-                data = cvol[i]  
-                if not (cmask[i]) or data.real<0:
+                data = cvol[i]/size  
+                if (cmask[i]>0) or data.real<0:
                     cvol[i] = clast[i]-scale*data
+                else:
+                    cvol[i] = data
     return vol
