@@ -1,0 +1,77 @@
+#!/usr/bin/python
+
+from PyQt4 import QtCore
+import matplotlib
+matplotlib.use('Qt4Agg')
+from matplotlib import pyplot as plt
+import numpy
+from scipy.misc import lena
+from scipy.signal import gaussian, sepfir2d
+from scipy.fftpack import fft2, ifft2
+from math import pi
+import time
+
+delay = 1
+
+shape = (512, 512)
+ref = numpy.zeros(shape, "complex128")
+ref[40:-40, 40:-40] = lena()[40:-40, 40:-40]
+direct = numpy.zeros(shape, dtype="complex128")
+fourier = numpy.zeros(shape, dtype="complex128")
+mask = numpy.zeros(shape, dtype="uint8")
+mask[40:-40, 40:-40] = 1
+fourier = fft2(ref)
+data = abs(fourier)
+g = gaussian(shape[0], 1)
+g /= g.sum()
+# phase = numpy.arctan2(fourier.imag, fourier.real) + 1 * sepfir2d(numpy.random.random(shape) - 0.5, g, g)
+phase = numpy.arctan2(fourier.imag, fourier.real) * sepfir2d(1 + 010 * (numpy.random.random(shape) - 0.5), g, g)
+# phase = sepfir2d(numpy.random.random(shape) * 2 * pi, g, g)
+# phase = numpy.ones(shape)  #
+
+fourier[:, :].real = data * numpy.cos(phase)
+fourier[:, :].imag = data * numpy.sin(phase)
+
+fig = plt.figure()
+ax1 = fig.add_subplot(1, 2, 1)
+ax2 = fig.add_subplot(1, 2, 2)
+im1 = ax1.imshow(ref.real, cmap="gray")
+im1.set_data(phase * 100)
+im2 = ax2.imshow(numpy.log(abs(fourier)))
+
+fig.show()
+raw_input()
+cnt = 0
+while True:
+    direct = ifft2(fourier)
+    if cnt == 0:
+        im1.set_data(abs(direct))
+        ax1.set_title("Cycle: %s" % (cnt + 1))
+        ax2.set_title("err= %.3f" % abs(ref - abs(direct)).max())
+        fig.canvas.draw()
+        QtCore.QCoreApplication.processEvents()
+        time.sleep(delay)
+    direct *= mask
+    im1.set_data(abs(direct))
+    if cnt == 0:
+        fig.canvas.draw()
+        QtCore.QCoreApplication.processEvents()
+        time.sleep(delay)
+    fourier = fft2(direct)
+    im2.set_data(numpy.log(abs(fourier)))
+    if cnt == 0:
+        im2.set_data(numpy.log(abs(fourier)))
+        fig.canvas.draw()
+        QtCore.QCoreApplication.processEvents()
+        time.sleep(delay)
+    fourier *= data / abs(fourier)
+    im2.set_data(numpy.log(abs(fourier)))
+    ax1.set_title("Cycle: %s" % (cnt + 1))
+    ax2.set_title("err= %.3f" % abs(ref - abs(direct)).mean())
+    fig.canvas.draw()
+    QtCore.QCoreApplication.processEvents()
+    if cnt == 0:
+        time.sleep(delay)
+    cnt += 1
+
+
